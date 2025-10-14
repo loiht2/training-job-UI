@@ -75,7 +75,8 @@ const REGION = "us-east-1"; // demo
 function generateJobName(prefix = "train") {
   const dt = new Date();
   const stamp = dt.toISOString().replace(/[-:T.Z]/g, "").slice(0, 14);
-  return `${prefix}-${stamp.toLowerCase()}`;
+  const random = Math.random().toString(36).slice(2, 6);
+  return `${prefix}-${stamp.toLowerCase()}-${random}`;
 }
 
 const JOB_NAME_REGEX = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;

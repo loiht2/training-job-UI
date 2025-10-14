@@ -49,8 +49,6 @@ components.json    # shadcn component registry
 
 ![Training Job UI screenshot](./public/preview.png "Training Job UI preview")
 
-> Tip: capture a screenshot of the form and save it as `public/preview.png` to replace the placeholder above.
-
 ## Contributing
 
 1. Fork the repo and create a feature branch.
