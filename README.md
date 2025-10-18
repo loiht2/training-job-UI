@@ -15,7 +15,7 @@ Then open <http://localhost:3000> to interact with the form.
 
 - **Algorithm setup** – choose builtin or custom container images and toggle training metrics.
 - **Resource configuration** – specify CPU, memory, GPU, instance counts, storage, and distributed settings.
-- **Input data configuration** – manage multiple channels, including S3 or local upload sources, with a guided side panel editor.
+- **Input data configuration** – manage multiple channels pointing to object stores or file uploads, with a guided side panel editor.
 - **Stopping conditions & output** – set runtime limits and output artifact locations.
 - **Payload download** – export the sanitized job payload JSON for API calls.
 
