@@ -37,7 +37,7 @@ spec:
         - uri:
             prefix: /_next/
         - uri:
-            prefix: /api
+            prefix: /api/jobs
       route:
         - destination:
             host: training-job-ui.default.svc.cluster.local
