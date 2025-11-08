@@ -1,47 +1,25 @@
-'use client';
+import { useEffect, useMemo, useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
 
-import { Suspense, useEffect, useMemo, useState } from "react";
-import Link from "next/link";
-import { useSearchParams } from "next/navigation";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-
-type JobStatus = "Pending" | "Running" | "Succeeded" | "Failed";
-
-type StoredJob = {
-  id: string;
-  algorithm: string;
-  createdAt: number;
-  priority: number;
-  status: JobStatus;
-  pendingUntil?: number;
-};
+import { loadJobs } from "@/lib/jobs-storage";
+import type { JobStatus, StoredJob } from "@/types/training-job";
 
 const JOB_STATUSES = new Set<JobStatus>(["Pending", "Running", "Succeeded", "Failed"]);
-const RAW_BASE_PATH = (process.env.NEXT_PUBLIC_BASE_PATH ?? process.env.NEXT_BASE_PATH ?? '').trim();
-const BASE_PATH = RAW_BASE_PATH ? RAW_BASE_PATH.replace(/\/+$/, '') : '';
-const API_JOBS_ENDPOINT = BASE_PATH ? `${BASE_PATH}/api/jobs` : '/api/jobs';
 
 function formatTimestamp(ts: number) {
   return new Date(ts).toLocaleString();
 }
 
 function CreateButton() {
-  const searchParams = useSearchParams();
-  const qs = searchParams?.toString();
+  const [searchParams] = useSearchParams();
+  const qs = searchParams.toString();
   const href = qs ? `/create?${qs}` : "/create";
   return (
     <Button asChild size="lg">
-      <Link href={href}>Create Training Job</Link>
-    </Button>
-  );
-}
-
-function CreateButtonFallback() {
-  return (
-    <Button size="lg" disabled>
-      Create Training Job
+      <Link to={href}>Create Training Job</Link>
     </Button>
   );
 }
@@ -53,47 +31,36 @@ export default function TrainingJobsListPage() {
     let ignore = false;
     let timer: number | undefined;
 
-    async function loadJobsFromServer() {
+    async function load() {
       try {
-        const response = await fetch(API_JOBS_ENDPOINT, { cache: "no-store" });
-        if (!response.ok) {
-          throw new Error(`Failed to fetch jobs: ${response.status}`);
-        }
-        const data = (await response.json()) as { ok?: boolean; jobs?: unknown };
-        if (ignore) return;
-        if (data?.ok && Array.isArray(data.jobs)) {
-          const parsed = data.jobs.filter((item): item is StoredJob => {
-            if (!item || typeof item !== 'object') return false;
+        const data = await loadJobs();
+        if (!ignore) {
+          const parsed = data.filter((item): item is StoredJob => {
+            if (!item || typeof item !== "object") return false;
             const maybe = item as Partial<StoredJob>;
             return (
-              typeof maybe.id === 'string' &&
-              typeof maybe.algorithm === 'string' &&
-              typeof maybe.createdAt === 'number' &&
-              typeof maybe.priority === 'number' &&
-              typeof maybe.status === 'string' &&
+              typeof maybe.id === "string" &&
+              typeof maybe.algorithm === "string" &&
+              typeof maybe.createdAt === "number" &&
+              typeof maybe.priority === "number" &&
+              typeof maybe.status === "string" &&
               JOB_STATUSES.has(maybe.status as JobStatus)
             );
           });
           setJobs(parsed);
-        } else {
-          setJobs([]);
         }
       } catch (error) {
-        console.error('Failed to load jobs', error);
+        console.error("Failed to load jobs", error);
         if (!ignore) setJobs([]);
       }
     }
 
-    loadJobsFromServer();
-    if (typeof window !== "undefined") {
-      timer = window.setInterval(loadJobsFromServer, 5000);
-    }
+    load();
+    timer = window.setInterval(load, 5000);
 
     return () => {
       ignore = true;
-      if (typeof window !== "undefined" && timer) {
-        window.clearInterval(timer);
-      }
+      if (timer) window.clearInterval(timer);
     };
   }, []);
 
@@ -102,8 +69,8 @@ export default function TrainingJobsListPage() {
     const interval = window.setInterval(() => {
       setJobs((prev) =>
         prev.map((job) => {
-          if (job.status === 'Pending' && job.pendingUntil && Date.now() >= job.pendingUntil) {
-            return { ...job, status: 'Running' as JobStatus, pendingUntil: undefined };
+          if (job.status === "Pending" && job.pendingUntil && Date.now() >= job.pendingUntil) {
+            return { ...job, status: "Running" as JobStatus, pendingUntil: undefined };
           }
           return job;
         })
@@ -112,22 +79,17 @@ export default function TrainingJobsListPage() {
     return () => window.clearInterval(interval);
   }, [jobs.length]);
 
-  const sortedJobs = useMemo(
-    () => [...jobs].sort((a, b) => b.createdAt - a.createdAt),
-    [jobs]
-  );
+  const sortedJobs = useMemo(() => [...jobs].sort((a, b) => b.createdAt - a.createdAt), [jobs]);
 
   return (
     <main className="min-h-screen bg-gradient-to-b from-slate-50 to-white">
-      <div className="mx-auto max-w-6xl p-6 md:p-10 space-y-6">
+      <div className="mx-auto max-w-6xl space-y-6 p-6 md:p-10">
         <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
           <div>
             <h1 className="text-3xl font-semibold tracking-tight">Training Jobs</h1>
             <p className="text-slate-600">Monitor the status of submitted jobs or create a new one.</p>
           </div>
-          <Suspense fallback={<CreateButtonFallback />}>
-            <CreateButton />
-          </Suspense>
+          <CreateButton />
         </div>
 
         {sortedJobs.length === 0 ? (
@@ -150,13 +112,13 @@ export default function TrainingJobsListPage() {
                     <span>Status</span>
                     <Badge
                       variant={
-                        job.status === 'Succeeded'
-                          ? 'secondary'
-                          : job.status === 'Running'
-                          ? 'default'
-                          : job.status === 'Pending'
-                          ? 'outline'
-                          : 'destructive'
+                        job.status === "Succeeded"
+                          ? "secondary"
+                          : job.status === "Running"
+                          ? "default"
+                          : job.status === "Pending"
+                          ? "outline"
+                          : "destructive"
                       }
                     >
                       {job.status}

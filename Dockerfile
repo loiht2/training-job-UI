@@ -1,37 +1,44 @@
-# Multi-stage build optimized for a smaller production image
+# Multi-stage build for the React/Vite application
 
-# 1. Install dependencies
-FROM node:20-alpine AS deps
+FROM node:18-alpine AS builder
 WORKDIR /app
+
+# Install dependencies
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN npm ci --frozen-lockfile --prefer-offline
 
-# 2. Build the Next.js app (standalone output)
-FROM node:20-alpine AS builder
-WORKDIR /app
-COPY --from=deps /app/node_modules ./node_modules
+# Copy source files
 COPY . .
-ARG NEXT_BASE_PATH="/"
-ENV NEXT_BASE_PATH=${NEXT_BASE_PATH}
-ENV NEXT_PUBLIC_BASE_PATH=${NEXT_BASE_PATH}
-RUN npm run build
-RUN npm prune --production
-RUN mkdir -p tmp/jobs
 
-# 3. Production runner (distroless Node.js)
-FROM gcr.io/distroless/nodejs20-debian12:nonroot AS runner
-WORKDIR /app
+# Build the application with production optimizations
 ENV NODE_ENV=production
-ENV PORT=3000
-ARG NEXT_BASE_PATH="/"
-ENV NEXT_BASE_PATH=${NEXT_BASE_PATH}
-ENV NEXT_PUBLIC_BASE_PATH=${NEXT_BASE_PATH}
+RUN npm run build
 
-# Copy standalone output and static assets
-COPY --from=builder --chown=nonroot:nonroot /app/.next/standalone ./ 
-COPY --from=builder --chown=nonroot:nonroot /app/.next/static ./.next/static
-COPY --from=builder --chown=nonroot:nonroot /app/public ./public
-COPY --from=builder --chown=nonroot:nonroot /app/tmp ./tmp
+# Production stage
+FROM nginx:1.27-alpine AS runner
+WORKDIR /usr/share/nginx/html
 
-EXPOSE 3000
-CMD ["/app/server.js"]
+# Remove default nginx static assets
+RUN rm -rf ./*
+
+# Copy built assets from builder
+COPY --from=builder /app/dist ./
+
+# Copy nginx configuration
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+
+# Add health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD wget --quiet --tries=1 --spider http://localhost/ || exit 1
+
+# Use non-root user for better security
+RUN chown -R nginx:nginx /usr/share/nginx/html && \
+    chown -R nginx:nginx /var/cache/nginx && \
+    chown -R nginx:nginx /var/log/nginx && \
+    touch /var/run/nginx.pid && \
+    chown -R nginx:nginx /var/run/nginx.pid
+
+USER nginx
+
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]

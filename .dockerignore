@@ -4,5 +4,6 @@ Dockerfile
 .dockerignore
 .git
 .gitignore
-.next
+dist
 .env
+tmp

@@ -18,14 +18,7 @@ spec:
         - name: training-job-ui
           image: docker.io/loihoangthanh1411/kf-training-job:v0.10
           ports:
-            - containerPort: 3000
-          env:
-            - name: NODE_ENV
-              value: production
-            - name: NEXT_BASE_PATH
-              value: /training-job
-            - name: NEXT_PUBLIC_BASE_PATH
-              value: /training-job
+            - containerPort: 80
 ---
 apiVersion: v1
 kind: Service
@@ -40,5 +33,5 @@ spec:
   ports:
     - name: http
       port: 80
-      targetPort: 3000
+      targetPort: 80
       nodePort: 32010

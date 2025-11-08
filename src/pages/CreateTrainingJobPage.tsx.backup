@@ -1,8 +1,5 @@
-'use client';
-
-import React, { useMemo, useRef, useState } from "react";
-import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -12,69 +9,29 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
-import { ChevronDown, ChevronUp, Copy, FileJson2, Plus, Trash2 } from "lucide-react";
-
-type AlgorithmSource = "builtin" | "container";
-
-type StorageProvider = "aws" | "minio" | "gcs" | "azure" | "custom";
-
-type Channel = {
-  id: string;
-  channelName: string;
-  sourceType: "object-storage" | "upload";
-  storageProvider?: StorageProvider;
-  endpoint?: string;
-  bucket?: string;
-  prefix?: string;
-  region?: string;
-  uploadFileName?: string;
-  contentType?: string;
-  compressionType?: "None" | "Gzip";
-  distribution?: "FullyReplicated" | "ShardedByKey";
-  recordWrapperType?: "None" | "RecordIO";
-  inputModeOverride?: "File" | "Pipe";
-};
-
-type TrainingJobForm = {
-  jobName: string;
-  priority: number;
-  region: string;
-  algorithm: {
-    source: AlgorithmSource;
-    algorithmName?: string;
-    imageUri?: string;
-    enableMetrics: boolean;
-  };
-  resources: {
-    instanceResources: {
-      cpuCores: number;
-      memoryGiB: number;
-      gpuCount: number;
-    };
-    instanceCount: number;
-    volumeSizeGB: number;
-    distributed: {
-      enabled: boolean;
-      strategy: "mpi" | "ps";
-      worldSize?: number;
-      processesPerHost?: number;
-    };
-  };
-  stoppingCondition: { maxRuntimeSeconds: number };
-  inputDataConfig: Channel[];
-  outputDataConfig: { artifactUri: string };
-};
-
-type JobStatus = "Pending" | "Running" | "Succeeded" | "Failed";
-
-type StoredJob = {
-  id: string;
-  algorithm: string;
-  createdAt: number;
-  priority: number;
-  status: JobStatus;
-  pendingUntil?: number;
-};
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { 
+  ChevronDown, 
+  ChevronUp, 
+  Copy, 
+  FileJson2, 
+  Plus, 
+  Trash2,
+  Settings2,
+  Cpu,
+  Database,
+  Clock,
+  Upload,
+  AlertCircle,
+  CheckCircle2,
+  Sparkles,
+  Container,
+  ArrowLeft,
+  Folder
+} from "lucide-react";
+import { getDefaultHyperparameters, getHyperparameterConfig, type HyperparameterValues } from "@/app/create/hyperparameters";
+import { persistJob } from "@/lib/jobs-storage";
+import type { AlgorithmSource, Channel, JobPayload, StorageProvider, StoredJob, TrainingJobForm } from "@/types/training-job";
 
 const builtinAlgorithms = [
   { id: "xgboost", name: "XGBoost" },
@@ -83,15 +40,10 @@ const builtinAlgorithms = [
   { id: "tensorflow-transformer", name: "TensorFlow Transformer" },
   { id: "tf-distributed", name: "TensorFlow Distributed" },
   { id: "horovod-mpi", name: "Horovod (MPI)" },
-  // { id: "deepspeed-mpi", name: "DeepSpeed (MPI)" },
   { id: "deepspeed-zero3", name: "DeepSpeed" },
   { id: "jax-pjit", name: "JAX PJIT" },
-  { id: "kfp-mpijob", name: "Kubeflow MPI" },
-  { id: "kfp-jaxjob", name: "Kubeflow JAX" },
-  { id: "kfp-tfjob", name: "Kubeflow TF" },
-  { id: "kfp-xgboost", name: "Kubeflow XGBoost" },
   { id: "torch-mpi", name: "PyTorch MPI" },
-];
+] as const;
 
 const DEFAULT_STORAGE_PROVIDER: StorageProvider = "minio";
 
@@ -112,11 +64,7 @@ const storageProviderLabels: Record<StorageProvider, string> = {
 };
 
 const INPUT_MODE_NONE = "none" as const;
-const REGION = "us-east-1";
-const RAW_BASE_PATH = (process.env.NEXT_PUBLIC_BASE_PATH ?? process.env.NEXT_BASE_PATH ?? "").trim();
-const BASE_PATH = RAW_BASE_PATH ? RAW_BASE_PATH.replace(/\/+$/, "") : "";
-const LIST_ROUTE = "/training-job";
-const API_JOBS_ENDPOINT = BASE_PATH ? `${BASE_PATH}/api/jobs` : "/api/jobs";
+const LIST_ROUTE = "/";
 
 function generateJobName(prefix = "train") {
   const dt = new Date();
@@ -146,24 +94,21 @@ function deepClone<T>(x: T): T {
   return JSON.parse(JSON.stringify(x));
 }
 
-function formToPayload(form: TrainingJobForm) {
+function formToPayload(form: TrainingJobForm): JobPayload {
   return {
     jobName: form.jobName,
     priority: form.priority,
     algorithm: {
       source: form.algorithm.source,
       algorithmName: form.algorithm.algorithmName,
-      imageUri: form.algorithm.imageUri,
-      enableMetrics: form.algorithm.enableMetrics,
-    },
+      imageUri: form.algorithm.imageUri,    },
     resources: deepClone(form.resources),
     stoppingCondition: deepClone(form.stoppingCondition),
     inputDataConfig: deepClone(form.inputDataConfig),
     outputDataConfig: deepClone(form.outputDataConfig),
+    hyperparameters: deepClone(form.hyperparameters),
   };
 }
-
-type JobPayload = ReturnType<typeof formToPayload>;
 
 function validateForm(form: TrainingJobForm) {
   const errors: string[] = [];
@@ -194,28 +139,14 @@ function validateForm(form: TrainingJobForm) {
   return errors;
 }
 
-type PersistResponse = { ok: true; filename?: string } | { ok: false };
+type PersistResponse = { ok: true; filename: string } | { ok: false };
 
-async function persistPayloadOnServer(payload: JobPayload, job: StoredJob): Promise<PersistResponse> {
-  try {
-    const response = await fetch(API_JOBS_ENDPOINT, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ payload, job }),
-    });
-    if (!response.ok) return { ok: false };
-    const parsed = (await response.json()) as { ok?: boolean; filename?: unknown };
-    if (parsed?.ok) {
-      return {
-        ok: true,
-        filename: typeof parsed?.filename === "string" ? parsed.filename : undefined,
-      };
-    }
-    return { ok: false };
-  } catch (error) {
-    console.error("Failed to persist payload", error);
-    return { ok: false };
+async function persistPayload(payload: JobPayload, job: StoredJob): Promise<PersistResponse> {
+  const result = await persistJob(payload, job);
+  if (result.ok) {
+    return { ok: true, filename: result.filename };
   }
+  return { ok: false };
 }
 
 function ChannelEditor({ value, onChange }: { value: Channel; onChange: (c: Channel) => void }) {
@@ -235,20 +166,6 @@ function ChannelEditor({ value, onChange }: { value: Channel; onChange: (c: Chan
             <Label>Channel name</Label>
             <Input value={value.channelName} onChange={(e) => updateChannel({ channelName: e.target.value })} placeholder="train" />
           </div>
-          <div className="grid gap-2">
-            <Label>Content type</Label>
-            <Input value={value.contentType || ""} onChange={(e) => updateChannel({ contentType: e.target.value })} placeholder="text/csv" />
-          </div>
-        </div>
-        <div className="grid gap-2">
-          <Label>Compression</Label>
-          <Select value={value.compressionType || "None"} onValueChange={(v) => updateChannel({ compressionType: v as Channel["compressionType"] })}>
-            <SelectTrigger><SelectValue placeholder="Compression" /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="None">None</SelectItem>
-              <SelectItem value="Gzip">Gzip</SelectItem>
-            </SelectContent>
-          </Select>
         </div>
       </div>
 
@@ -292,10 +209,6 @@ function ChannelEditor({ value, onChange }: { value: Channel; onChange: (c: Chan
                     ))}
                   </SelectContent>
                 </Select>
-              </div>
-              <div className="grid gap-2">
-                <Label>Region (optional)</Label>
-                <Input value={value.region || ""} onChange={(e) => updateChannel({ region: e.target.value })} placeholder="us-east-1" />
               </div>
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
@@ -343,67 +256,26 @@ function ChannelEditor({ value, onChange }: { value: Channel; onChange: (c: Chan
           </div>
         )}
       </div>
-
-      <div className="grid gap-4 sm:grid-cols-3">
-        <div className="grid gap-2">
-          <Label>Distribution</Label>
-          <Select value={value.distribution || "FullyReplicated"} onValueChange={(v) => updateChannel({ distribution: v as Channel["distribution"] })}>
-            <SelectTrigger><SelectValue placeholder="Distribution" /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="FullyReplicated">Fully replicated</SelectItem>
-              <SelectItem value="ShardedByKey">Sharded by key</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-        <div className="grid gap-2">
-          <Label>Record wrapper</Label>
-          <Select value={value.recordWrapperType || "None"} onValueChange={(v) => updateChannel({ recordWrapperType: v as Channel["recordWrapperType"] })}>
-            <SelectTrigger><SelectValue placeholder="Record wrapper" /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="None">None</SelectItem>
-              <SelectItem value="RecordIO">RecordIO</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-        <div className="grid gap-2">
-          <Label>Input mode override (optional)</Label>
-          <Select
-            value={value.inputModeOverride ?? INPUT_MODE_NONE}
-            onValueChange={(v) =>
-              updateChannel({
-                inputModeOverride: v === INPUT_MODE_NONE ? undefined : (v as Channel["inputModeOverride"]),
-              })
-            }
-          >
-            <SelectTrigger><SelectValue placeholder="—" /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value={INPUT_MODE_NONE}>—</SelectItem>
-              <SelectItem value="File">File</SelectItem>
-              <SelectItem value="Pipe">Pipe</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-      </div>
     </div>
   );
 }
 
 export default function CreateTrainingJobUI() {
-  const router = useRouter();
-  const [form, setForm] = useState<TrainingJobForm>({
+  const navigate = useNavigate();
+  const location = useLocation();
+  const defaultAlgorithmId = builtinAlgorithms[0].id;
+  const [form, setForm] = useState<TrainingJobForm>(() => ({
     jobName: generateJobName(),
     priority: 500,
-    region: REGION,
     algorithm: {
-      source: "builtin",
-      algorithmName: builtinAlgorithms[0].id,
+      source: "builtin" as const,
+      algorithmName: defaultAlgorithmId,
       enableMetrics: true,
     },
     resources: {
       instanceResources: { cpuCores: 4, memoryGiB: 16, gpuCount: 0 },
       instanceCount: 1,
       volumeSizeGB: 50,
-      distributed: { enabled: false, strategy: "mpi" },
     },
     stoppingCondition: { maxRuntimeSeconds: 3600 * 4 },
     inputDataConfig: [
@@ -415,15 +287,13 @@ export default function CreateTrainingJobUI() {
         endpoint: "https://minio.local",
         bucket: "storage://input",
         prefix: "datasets/default/",
-        region: REGION,
-        contentType: "",
-        compressionType: "None",
-        distribution: "FullyReplicated",
-        recordWrapperType: "None",
       },
     ],
     outputDataConfig: { artifactUri: "storage://output/artifacts/" },
-  });
+    hyperparameters: {
+      [defaultAlgorithmId]: getDefaultHyperparameters(defaultAlgorithmId),
+    },
+  }));
 
   const [reviewOpen, setReviewOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -432,19 +302,55 @@ export default function CreateTrainingJobUI() {
   const payload = useMemo(() => formToPayload(form), [form]);
   const errors = useMemo(() => validateForm(form), [form]);
 
-  function update<K extends keyof TrainingJobForm>(key: K, value: TrainingJobForm[K]) {
+  const update = useCallback(<K extends keyof TrainingJobForm>(key: K, value: TrainingJobForm[K]) => {
     setForm((prev) => ({ ...prev, [key]: value }));
-  }
+  }, []);
 
-  function updateAlgorithm(partial: Partial<TrainingJobForm["algorithm"]>) {
-    update("algorithm", { ...form.algorithm, ...partial });
-  }
+  const updateAlgorithm = useCallback((partial: Partial<TrainingJobForm["algorithm"]>) => {
+    setForm((prev) => {
+      const nextAlgorithm = { ...prev.algorithm, ...partial };
+      const nextHyperparameters = { ...prev.hyperparameters };
 
-  function updateResources(partial: Partial<TrainingJobForm["resources"]>) {
-    update("resources", { ...form.resources, ...partial });
-  }
+      if (nextAlgorithm.source === "builtin") {
+        const resolvedId = nextAlgorithm.algorithmName || defaultAlgorithmId;
+        nextAlgorithm.algorithmName = resolvedId;
+        if (!nextHyperparameters[resolvedId]) {
+          nextHyperparameters[resolvedId] = getDefaultHyperparameters(resolvedId);
+        }
+      } else {
+        nextAlgorithm.algorithmName = undefined;
+      }
 
-  function addChannel(template?: Partial<Channel>) {
+      return {
+        ...prev,
+        algorithm: nextAlgorithm,
+        hyperparameters: nextHyperparameters,
+      };
+    });
+  }, [defaultAlgorithmId]);
+
+  const updateResources = useCallback((partial: Partial<TrainingJobForm["resources"]>) => {
+    setForm((prev) => ({
+      ...prev,
+      resources: { ...prev.resources, ...partial },
+    }));
+  }, []);
+
+  const updateHyperparameters = useCallback((algorithmId: string, value: HyperparameterValues) => {
+    setForm((prev) => ({
+      ...prev,
+      hyperparameters: {
+        ...prev.hyperparameters,
+        [algorithmId]: value,
+      },
+    }));
+  }, []);
+
+  const resetHyperparameters = useCallback((algorithmId: string) => {
+    updateHyperparameters(algorithmId, getDefaultHyperparameters(algorithmId));
+  }, [updateHyperparameters]);
+
+  const addChannel = useCallback((template?: Partial<Channel>) => {
     const next: Channel = {
       id: randomId("channel"),
       channelName: template?.channelName || "",
@@ -453,38 +359,71 @@ export default function CreateTrainingJobUI() {
       endpoint: template?.endpoint || "https://minio.local",
       bucket: template?.bucket || "storage://input",
       prefix: template?.prefix || "datasets/default/",
-      region: template?.region || REGION,
       uploadFileName: template?.uploadFileName || "",
-      contentType: template?.contentType || "",
-      compressionType: template?.compressionType || "None",
-      distribution: template?.distribution || "FullyReplicated",
-      recordWrapperType: template?.recordWrapperType || "None",
-      inputModeOverride: template?.inputModeOverride,
     };
-    update("inputDataConfig", [...form.inputDataConfig, next]);
-  }
+    setForm((prev) => ({
+      ...prev,
+      inputDataConfig: [...prev.inputDataConfig, next],
+    }));
+  }, []);
 
-  function removeChannel(id: string) {
-    update("inputDataConfig", form.inputDataConfig.filter((c) => c.id !== id));
-  }
+  const removeChannel = useCallback((id: string) => {
+    setForm((prev) => ({
+      ...prev,
+      inputDataConfig: prev.inputDataConfig.filter((c) => c.id !== id),
+    }));
+  }, []);
 
-  function duplicateChannel(id: string) {
-    const src = form.inputDataConfig.find((c) => c.id === id);
-    if (!src) return;
-    const copy = { ...deepClone(src), id: randomId("channel"), channelName: `${src.channelName}-copy` };
-    update("inputDataConfig", [...form.inputDataConfig, copy]);
-  }
+  const duplicateChannel = useCallback((id: string) => {
+    setForm((prev) => {
+      const src = prev.inputDataConfig.find((c) => c.id === id);
+      if (!src) return prev;
+      const copy = { ...deepClone(src), id: randomId("channel"), channelName: `${src.channelName}-copy` };
+      return {
+        ...prev,
+        inputDataConfig: [...prev.inputDataConfig, copy],
+      };
+    });
+  }, []);
 
-  function moveChannel(id: string, dir: -1 | 1) {
-    const idx = form.inputDataConfig.findIndex((c) => c.id === id);
-    if (idx < 0) return;
-    const arr = [...form.inputDataConfig];
-    const j = idx + dir;
-    if (j < 0 || j >= arr.length) return;
-    const [item] = arr.splice(idx, 1);
-    arr.splice(j, 0, item);
-    update("inputDataConfig", arr);
-  }
+  const moveChannel = useCallback((id: string, dir: -1 | 1) => {
+    setForm((prev) => {
+      const idx = prev.inputDataConfig.findIndex((c) => c.id === id);
+      if (idx < 0) return prev;
+      const arr = [...prev.inputDataConfig];
+      const j = idx + dir;
+      if (j < 0 || j >= arr.length) return prev;
+      const [item] = arr.splice(idx, 1);
+      arr.splice(j, 0, item);
+      return {
+        ...prev,
+        inputDataConfig: arr,
+      };
+    });
+  }, []);
+
+  const activeAlgorithmId = form.algorithm.source === "builtin" ? form.algorithm.algorithmName || defaultAlgorithmId : null;
+  const activeHyperparameterConfig = activeAlgorithmId ? getHyperparameterConfig(activeAlgorithmId) : undefined;
+  const activeHyperparameters = activeAlgorithmId
+    ? form.hyperparameters[activeAlgorithmId] ?? getDefaultHyperparameters(activeAlgorithmId)
+    : undefined;
+  const HyperparameterFormComponent = activeHyperparameterConfig?.Form;
+
+  useEffect(() => {
+    if (!activeAlgorithmId) return;
+    setForm((prev) => {
+      if (prev.hyperparameters[activeAlgorithmId]) {
+        return prev;
+      }
+      return {
+        ...prev,
+        hyperparameters: {
+          ...prev.hyperparameters,
+          [activeAlgorithmId]: getDefaultHyperparameters(activeAlgorithmId),
+        },
+      };
+    });
+  }, [activeAlgorithmId]);
 
   async function submit() {
     if (errors.length) {
@@ -504,35 +443,19 @@ export default function CreateTrainingJobUI() {
         createdAt: Date.now(),
         priority: form.priority,
         status: "Pending",
-      pendingUntil: Date.now() + 15000,
+        pendingUntil: Date.now() + 15000,
       };
 
-      const persistenceResult = await persistPayloadOnServer(payload, job);
+      const persistenceResult = await persistPayload(payload, job);
       const serverMessage = persistenceResult.ok
-        ? ` JSON saved to tmp/jobs/${persistenceResult.filename ?? "(see server directory)"}.`
-        : " Server copy could not be saved (check logs).";
+        ? ` JSON stored locally as ${persistenceResult.filename}.`
+        : " Local copy could not be saved (check logs).";
       setSubmitResult({
         ok: true,
         message: `Training job created.${serverMessage}`,
       });
       setReviewOpen(false);
-      if (typeof window !== "undefined") {
-
-        const search = window.location.search || "";
-        const pathname = window.location.pathname;
-        let redirect = LIST_ROUTE;
-        if (pathname.startsWith("/_/training-jobs")) {
-          redirect = "/_/training-job";
-        } else if (pathname.startsWith("/_/training-job")) {
-          redirect = "/_/training-job";
-        } else if (BASE_PATH && pathname.startsWith(BASE_PATH)) {
-          redirect = LIST_ROUTE;
-        }
-
-        window.location.assign(`${redirect}${search}`);
-      } else {
-        router.push(LIST_ROUTE);
-      }
+      navigate({ pathname: LIST_ROUTE, search: location.search }, { replace: true });
     } catch (error) {
       console.error("Failed to submit job", error);
       setSubmitResult({ ok: false, message: "Unexpected error while creating job." });
@@ -545,26 +468,63 @@ export default function CreateTrainingJobUI() {
   const maxRuntimeMinutes = Math.floor((form.stoppingCondition.maxRuntimeSeconds % 3600) / 60);
 
   return (
-    <div className="w-full min-h-screen bg-gradient-to-b from-slate-50 to-white">
-      <div className="mx-auto max-w-6xl p-6 md:p-10">
-        <div className="mb-6">
-          <div className="space-y-2">
-            <Link href="/training-job" className="text-sm text-blue-600 hover:underline">
-              ← Back to job list
-            </Link>
-            <div>
-              <h1 className="text-3xl font-semibold tracking-tight">Create Training Job</h1>
-              <p className="text-slate-600 mt-1">Define job settings, algorithm, resources, inputs, stopping conditions, and outputs.</p>
+    <div className="w-full min-h-screen bg-gradient-to-br from-slate-50 via-blue-50/30 to-slate-50">
+      {/* Header */}
+      <div className="border-b bg-white/80 backdrop-blur-sm sticky top-0 z-10">
+        <div className="mx-auto max-w-7xl px-6 py-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-4">
+              <Link 
+                to={LIST_ROUTE} 
+                className="flex items-center gap-2 text-sm text-slate-600 hover:text-slate-900 transition-colors"
+              >
+                <ArrowLeft className="h-4 w-4" />
+                <span>Back to Jobs</span>
+              </Link>
+              <div className="h-6 w-px bg-slate-300" />
+              <div>
+                <h1 className="text-2xl font-bold bg-gradient-to-r from-slate-900 to-slate-700 bg-clip-text text-transparent">
+                  Create Training Job
+                </h1>
+              </div>
+            </div>
+            <div className="flex items-center gap-3">
+              {errors.length === 0 ? (
+                <div className="flex items-center gap-2 text-sm text-emerald-600">
+                  <CheckCircle2 className="h-4 w-4" />
+                  <span className="font-medium">Ready to submit</span>
+                </div>
+              ) : (
+                <div className="flex items-center gap-2 text-sm text-amber-600">
+                  <AlertCircle className="h-4 w-4" />
+                  <span className="font-medium">{errors.length} issue{errors.length === 1 ? "" : "s"}</span>
+                </div>
+              )}
             </div>
           </div>
         </div>
+      </div>
 
-        <div className="grid gap-6">
-          <Card>
-            <CardHeader>
-              <CardTitle>Job settings</CardTitle>
-              <CardDescription>Name the training job.</CardDescription>
-            </CardHeader>
+      <div className="mx-auto max-w-7xl px-6 py-8">
+        {/* Configuration Steps */}
+        <div className="grid gap-8">
+          {/* Step 1: Job Configuration */}
+          <div className="space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="flex h-8 w-8 items-center justify-center rounded-full bg-blue-600 text-white text-sm font-semibold">
+                1
+              </div>
+              <h2 className="text-xl font-semibold text-slate-900">Job Configuration</h2>
+            </div>
+            
+            <Card className="border-2 shadow-sm hover:shadow-md transition-shadow">
+              <CardHeader className="bg-gradient-to-r from-blue-50 to-transparent">
+                <div className="flex items-center gap-2">
+                  <Settings2 className="h-5 w-5 text-blue-600" />
+                  <CardTitle>Basic Settings</CardTitle>
+                </div>
+                <CardDescription>Configure the job name and execution priority</CardDescription>
+              </CardHeader>
             <CardContent className="grid gap-4">
               <div className="grid gap-2">
                 <Label>Job name</Label>
@@ -661,15 +621,39 @@ export default function CreateTrainingJobUI() {
                   <p className="text-xs text-slate-500">Provide a fully qualified container image URI.</p>
                 </div>
               )}
-              <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-white px-3 py-2">
-                <div>
-                  <p className="text-sm font-medium text-slate-700">Enable metrics</p>
-                  <p className="text-xs text-slate-500">Emit algorithm metrics to the training dashboard.</p>
-                </div>
-                <Switch checked={form.algorithm.enableMetrics} onCheckedChange={(checked) => updateAlgorithm({ enableMetrics: checked })} />
-              </div>
             </CardContent>
           </Card>
+
+          {form.algorithm.source === "builtin" && activeAlgorithmId && (
+            <Card>
+              <CardHeader className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                <div>
+                  <CardTitle>Hyperparameters</CardTitle>
+                  <CardDescription>
+                    Fine-tune settings for {activeHyperparameterConfig?.label ?? "the selected algorithm"}.
+                  </CardDescription>
+                </div>
+                {HyperparameterFormComponent && (
+                  <Button type="button" variant="outline" size="sm" onClick={() => resetHyperparameters(activeAlgorithmId)}>
+                    Reset to defaults
+                  </Button>
+                )}
+              </CardHeader>
+              <CardContent className="grid gap-4">
+                {HyperparameterFormComponent ? (
+                  <HyperparameterFormComponent
+                    value={activeHyperparameters as HyperparameterValues}
+                    onChange={(next) => updateHyperparameters(activeAlgorithmId, next)}
+                  />
+                ) : (
+                  <p className="text-sm text-slate-600">
+                    No hyperparameter form is registered yet. Update the files in <code>src/app/create/hyperparameters</code> to
+                    define inputs.
+                  </p>
+                )}
+              </CardContent>
+            </Card>
+          )}
 
           <Card>
             <CardHeader>
@@ -751,81 +735,6 @@ export default function CreateTrainingJobUI() {
                     }}
                   />
                 </div>
-              </div>
-              <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
-                <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                  <div>
-                    <p className="text-sm font-medium text-slate-700">Distributed training</p>
-                    <p className="text-xs text-slate-500">Enable if workers coordinate across nodes.</p>
-                  </div>
-                  <Switch
-                    checked={form.resources.distributed.enabled}
-                    onCheckedChange={(checked) =>
-                      updateResources({
-                        distributed: {
-                          ...form.resources.distributed,
-                          enabled: checked,
-                          ...(checked ? {} : { worldSize: undefined, processesPerHost: undefined }),
-                        },
-                      })
-                    }
-                  />
-                </div>
-                {form.resources.distributed.enabled && (
-                  <div className="mt-4 grid gap-4 md:grid-cols-3">
-                    <div className="grid gap-2">
-                      <Label>Strategy</Label>
-                      <Select
-                        value={form.resources.distributed.strategy}
-                        onValueChange={(value) =>
-                          updateResources({
-                            distributed: { ...form.resources.distributed, strategy: value as typeof form.resources.distributed.strategy },
-                          })
-                        }
-                      >
-                        <SelectTrigger>
-                          <SelectValue placeholder="Select strategy" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="mpi">MPI / Horovod</SelectItem>
-                          <SelectItem value="ps">Parameter Server</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    <div className="grid gap-2">
-                      <Label>World size</Label>
-                      <Input
-                        type="number"
-                        min={1}
-                        value={form.resources.distributed.worldSize ?? ""}
-                        onChange={(e) => {
-                          const raw = Number(e.target.value);
-                          const next = Number.isFinite(raw) ? Math.max(1, Math.floor(raw)) : undefined;
-                          updateResources({
-                            distributed: { ...form.resources.distributed, worldSize: next },
-                          });
-                        }}
-                        placeholder="Total processes"
-                      />
-                    </div>
-                    <div className="grid gap-2">
-                      <Label>Processes per host</Label>
-                      <Input
-                        type="number"
-                        min={1}
-                        value={form.resources.distributed.processesPerHost ?? ""}
-                        onChange={(e) => {
-                          const raw = Number(e.target.value);
-                          const next = Number.isFinite(raw) ? Math.max(1, Math.floor(raw)) : undefined;
-                          updateResources({
-                            distributed: { ...form.resources.distributed, processesPerHost: next },
-                          });
-                        }}
-                        placeholder="Optional"
-                      />
-                    </div>
-                  </div>
-                )}
               </div>
             </CardContent>
           </Card>
